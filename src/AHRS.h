@@ -5,7 +5,16 @@
 
 #define MPU_SPI
 
+static inline double deg2rad(double degs) {
+    return degs * M_PI / 180;
+}
+
+static inline double rad2deg(double rads) {
+    return rads / M_PI * 180;
+}
+
 #include "LowPass.h"
+#include "Quaternion.h"
 
 //MPU-6000 register list
 //From https://github.com/ArduPilot/ardupilot/blob/ArduCopter-3.2.1-apm-px4/libraries/AP_InertialSensor/AP_InertialSensor_MPU6000.cpp
@@ -165,12 +174,14 @@
 
 class AHRS {
 public:
-	//int cs;
-	
 	//HMC5883L compass;
 	
-	//AHRS(int cs);
+#ifdef MPU_SPI
+	int cs;
+	AHRS(int cs);
+#else
     AHRS();
+#endif
 	
 	long timeUntilCalibration = 0;
     byte calibrationTime = 0;
@@ -186,15 +197,17 @@ public:
 	//unsigned readCompass16(byte regHigh);
     
     void read();
-	bool update();
+	bool update(bool in_flight);
 	//void updateCompass();
     
-    double pitchBias, rollBias, yawBias;
+    double gyroBiasPitch, gyroBiasRoll, gyroBiasYaw;
+    double offsetPitch, offsetRoll;
 	
 	double pitchAccel, rollAccel, yawAccel;
 	
 	double compassHeading;
 	
+    Quaternion attitude;
 	double pitch, roll, heading;
     
     //The rate of pitch, roll, and yaw in degrees per second.

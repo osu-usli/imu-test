@@ -2,34 +2,39 @@
 #include <Arduino.h>
 
 #ifdef MPU_SPI
-static const int CS = 53;
+//static const int CS = 53;
 static const int BARO_CS = 40;
 #include <SPI.h>
 #else
 #include <Wire.h>
 #endif
 
-const float GYRO_PERCENTAGE = 0.999;
+//const float GYRO_PERCENTAGE = 1;
+const float GYRO_PERCENTAGE = 0.99;
+//const float GYRO_PERCENTAGE = 1;
 //const double ACCEL_SCALE = 1e-3;
 const unsigned CALIBRATION_THRESHOLD = 4096*0.14;
 const unsigned CALIBRATION_TIME = 3000;
+const unsigned CALIBRATION_TICKS = 100;
 
-const int ACCEL_BIAS_X = 55;
-const int ACCEL_BIAS_Y = -90;
-const int ACCEL_BIAS_Z = 533;
+const int ACCEL_BIAS_X = -19;
+const int ACCEL_BIAS_Y = 20;
+const int ACCEL_BIAS_Z = 273;
 
+#ifdef MPU_SPI
+AHRS::AHRS(int cs) {
+#else
 AHRS::AHRS() {
-    pitch = roll = heading = pitchAccel = rollAccel = yawAccel =
-    pitchBias = rollBias = yawBias =
-    xAccel = yAccel = zAccel = xGyro = yGyro = zGyro = compassHeading = 0;
+#endif
+    this->cs = cs;
 }
 
 
 bool AHRS::initialize() {
 #ifdef MPU_SPI
-    pinMode(CS, OUTPUT);
+    pinMode(cs, OUTPUT);
     pinMode(BARO_CS, OUTPUT);
-    digitalWrite(CS, HIGH);
+    digitalWrite(cs, HIGH);
     digitalWrite(BARO_CS, HIGH);
     pinMode(MOSI, OUTPUT);
     pinMode(MISO, INPUT);
@@ -43,25 +48,24 @@ bool AHRS::initialize() {
     //Boot the MPU
     writeMPURegister(MPUREG_PWR_MGMT_1, BIT_PWR_MGMT_1_DEVICE_RESET);
     delay(100);
-    writeMPURegister(MPUREG_PWR_MGMT_1, BIT_PWR_MGMT_1_CLK_ZGYRO);
+    writeMPURegister(MPUREG_USER_CTRL, BIT_USER_CTRL_SIG_COND_RESET
+#ifdef MPU_SPI
+            | BIT_USER_CTRL_I2C_IF_DIS
+#endif
+            );
     delay(100);
-    writeMPURegister(MPUREG_PWR_MGMT_1, 0);
-    delay(100);
+    //writeMPURegister(MPUREG_PWR_MGMT_1, 0);
+    //delay(100);
 
     Serial.print("MPU device ID: ");
     Serial.println(readMPURegister(MPUREG_WHOAMI));
     
     //Configure the clock source
-    //if (readMPURegister(MPUREG_PWR_MGMT_1) != BIT_PWR_MGMT_1_CLK_ZGYRO) {
-    if (readMPURegister(MPUREG_PWR_MGMT_1) != 0) {
+    writeMPURegister(MPUREG_PWR_MGMT_1, BIT_PWR_MGMT_1_CLK_ZGYRO);
+    delay(100);
+    if (readMPURegister(MPUREG_PWR_MGMT_1) != BIT_PWR_MGMT_1_CLK_ZGYRO) {
         return false;
     }
-    
-#ifdef MPU_SPI
-    //Disable i2c mode
-    writeMPURegister(MPUREG_USER_CTRL, BIT_USER_CTRL_I2C_IF_DIS);
-    delay(1);
-#endif
     
     //Set the filter to 98Hz
     writeMPURegister(MPUREG_CONFIG, BITS_DLPF_CFG_256HZ_NOLPF2);
@@ -93,11 +97,11 @@ bool AHRS::initialize() {
 #ifdef MPU_SPI
 void AHRS::beginSPI() {
     SPI.beginTransaction(SPISettings(20000000, MSBFIRST, SPI_MODE0));
-    digitalWrite(CS, LOW);
+    digitalWrite(cs, LOW);
 }
 
 void AHRS::endSPI() {
-    digitalWrite(CS, HIGH);
+    digitalWrite(cs, HIGH);
     SPI.endTransaction();
 }
 
@@ -191,13 +195,13 @@ void AHRS::read() {
     bufferIndex %= 5;
 }
 
-bool AHRS::update() {
+bool AHRS::update(bool in_flight) {
     if (!(readMPURegister(MPUREG_INT_STATUS) & BIT_RAW_RDY_INT)) {
         //if no new data is available, return
         return false;
     }
     
-    //Read inputs
+    //Read inputs (swapping X and Y because my flight controller is mounted sideways)
     xAccel = xAccelLPF.update(readMPU16(MPUREG_ACCEL_XOUT_H) - ACCEL_BIAS_X);
     yAccel = yAccelLPF.update(readMPU16(MPUREG_ACCEL_YOUT_H) - ACCEL_BIAS_Y);
     zAccel = zAccelLPF.update(readMPU16(MPUREG_ACCEL_ZOUT_H) - ACCEL_BIAS_Z);
@@ -211,12 +215,16 @@ bool AHRS::update() {
     //rollAccel = 180 * atan (xAccel/sqrt(pow(yAccel,2) +pow(zAccel,2)))/M_PI;
     //pitchAccel = 180 * atan (yAccel/sqrt(pow(xAccel,2) + pow(zAccel,2)))/M_PI;
     //yawAccel = 180 * atan(zAccel/sqrt(pow(xAccel, 2) + pow(ZAccel, 2)))/M_PI;
-    pitchAccel = atan2(
-                       (double)yAccel,
-                       (double)zAccel
-                       ) * 180/M_PI;
-    rollAccel = atan2(
-                      -(double)xAccel,
+    //pitchAccel = -atan2(
+    //                   (double)yAccel,
+    //                   (double)zAccel
+    //                   ) * 180/M_PI;
+    pitchAccel = -atan2(
+                      -(double)yAccel,
+                      sqrt(((double)xAccel)*xAccel + ((double)zAccel)*zAccel)
+                      ) * 180/M_PI;
+    rollAccel = -atan2(
+                      (double)xAccel,
                       sqrt(((double)yAccel)*yAccel + ((double)zAccel)*zAccel)
                       ) * 180/M_PI;
     
@@ -228,7 +236,7 @@ bool AHRS::update() {
     long totalAcceleration = sqrt(pow(xAccel, 2) + pow(yAccel, 2) + pow(zAccel, 2));
     //Serial.print("Total acceleration: ");
     //Serial.println(totalAcceleration);
-    if (abs(4096 - totalAcceleration) > CALIBRATION_THRESHOLD) {
+    if (in_flight || abs(4096 - totalAcceleration) > CALIBRATION_THRESHOLD) {
         //Serial.print("Not calibrating as difference is ");
         //Serial.println(abs(4096 - totalAcceleration));
         
@@ -240,17 +248,25 @@ bool AHRS::update() {
         //Serial.print("Calibrating AHRS.  Difference is ");
         //Serial.println(abs(4096 - totalAcceleration));
         
-        calibrationTime = 10;
+        calibrationTime = CALIBRATION_TICKS;
         
-        pitchBias = rollBias = yawBias = 0;
+        gyroBiasPitch = gyroBiasRoll = gyroBiasYaw = 0;
+
+        offsetPitch = 0;
+        offsetRoll = 0;
         
         pitch = pitchAccel;
-        roll = rollAccel;
+        roll = pitchAccel;
         heading = compassHeading;
+        attitude = Quaternion::fromEulerAngles(
+            deg2rad(heading), deg2rad(pitch), deg2rad(roll));
         
         timeUntilCalibration = CALIBRATION_TIME;
     }
-    
+
+    pitchAccel -= offsetPitch;
+    rollAccel -= offsetRoll;
+
     //Calculate pitch, yaw, and roll from the gyro
     //The gyro resolution is 250 degrees per second
     //that's 65.5*2 units per degree per second
@@ -258,33 +274,50 @@ bool AHRS::update() {
     pitchRate = (xGyro * (1000.0 / 0x7fff));
     rollRate  = (yGyro * (1000.0 / 0x7fff));
     yawRate   = (zGyro * (1000.0 / 0x7fff));
+
     if (calibrationTime != 0) {
-        pitchBias += pitchRate;
-        rollBias += rollRate;
-        yawBias += yawRate;
+        gyroBiasPitch += pitchRate;
+        gyroBiasRoll += rollRate;
+        gyroBiasYaw += yawRate;
         
         if (--calibrationTime == 0) {
-            pitchBias /= 10;
-            rollBias /= 10;
-            yawBias /= 10;
+            gyroBiasPitch /= CALIBRATION_TICKS;
+            gyroBiasRoll /= CALIBRATION_TICKS;
+            gyroBiasYaw /= CALIBRATION_TICKS;
         }
     } else {
-        pitchRate -= pitchBias;
-        rollRate -= rollBias;
-        yawRate -= yawBias;
+        pitchRate -= gyroBiasPitch;
+        rollRate -= gyroBiasRoll;
+        yawRate -= gyroBiasYaw;
 
-        double gyroPitch = pitchRate / 1000 * elapsed;
-        double gyroRoll = rollRate / 1000 * elapsed;
-        double gyroYaw = yawRate / 1000 * elapsed;
+        double dt2 = elapsed / 2000.0;
+        double dYaw2 = deg2rad(yawRate) * dt2;
+        double dPitch2 = deg2rad(pitchRate) * dt2;
+        double dRoll2 = deg2rad(rollRate) * dt2;
 
-        pitch += gyroPitch;
-        roll += gyroRoll;
-        heading += gyroYaw;
+        Quaternion attitudeInv = attitude.conjugate();
+        Quaternion yawAxis   = attitude * Quaternion(0, 0, 0, 1) * attitudeInv;
+        Quaternion rollAxis = attitude * Quaternion(0, 0, 1, 0) * attitudeInv;
+        Quaternion pitchAxis  = attitude * Quaternion(0, 1, 0, 0) * attitudeInv;
 
-        pitch = GYRO_PERCENTAGE*pitch + ((1-GYRO_PERCENTAGE) * pitchAccel);
-        roll = GYRO_PERCENTAGE*roll + ((1-GYRO_PERCENTAGE) * rollAccel);
+        Quaternion yawAdj = yawAxis * sin(dYaw2);
+        yawAdj.a = cos(dYaw2);
+        Quaternion pitchAdj = pitchAxis * sin(dPitch2);
+        pitchAdj.a = cos(dPitch2);
+        Quaternion rollAdj = rollAxis * sin(dRoll2);
+        rollAdj.a = cos(dRoll2);
+
+        attitude = rollAdj * pitchAdj * yawAdj * attitude;
+        heading = rad2deg(attitude.yaw());
+
+        Quaternion attitudeAccel = 
+                Quaternion::fromEulerAngles(deg2rad(heading), deg2rad(pitchAccel), deg2rad(rollAccel));
+        attitude = attitude.lerp_norm(attitudeAccel, 1-GYRO_PERCENTAGE);
+
+        pitch = rad2deg(attitude.pitch());
+        roll = rad2deg(attitude.roll());
     }
-    
+
     while (heading >= 360) heading -= 360;
     while (heading < 0) heading += 360;
     
